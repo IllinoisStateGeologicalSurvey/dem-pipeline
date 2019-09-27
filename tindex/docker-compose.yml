@@ -1,0 +1,43 @@
+version: '3'
+
+services:
+  scheduler:
+    command: dask-scheduler --host 0.0.0.0
+    image: jterstriep/dask-pdal
+    build: .
+    volumes:
+      - "/mnt/nrcs:/mnt/nrcs"
+#    networks:
+#      - tindex_overlay
+    ports:
+      - "9911:8787"
+      - "8786:8786"
+  worker:
+    command: dask-worker tcp://scheduler:8786
+    image: jterstriep/dask-pdal
+    volumes:
+      - "/mnt/nrcs:/mnt/nrcs"
+#    networks:
+#      - tindex_overlay
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+      
+  app:
+    command: python /app/tindex_job.py
+    image: jterstriep/dask-pdal
+    volumes:
+      - "/mnt/nrcs:/mnt/nrcs"
+      - "./app:/app"
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+      
+
+#networks:
+#  tindex_overlay:
+#    external: true
+

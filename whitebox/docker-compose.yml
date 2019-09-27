@@ -1,0 +1,45 @@
+version: '3'
+
+services:
+  scheduler:
+    command: dask-scheduler --host 0.0.0.0
+    image: jterstriep/dask-wbt
+    build: .
+    volumes:
+      - "/mnt/nrcs:/mnt/nrcs"
+#    networks:
+#      - tindex_overlay
+    ports:
+      - "9911:8787"
+      - "8786:8786"
+  worker:
+    command: dask-worker tcp://scheduler:8786
+    image: jterstriep/dask-wbt
+    volumes:
+      - "/mnt/nrcs:/mnt/nrcs"
+#    networks:
+#      - tindex_overlay
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+      
+  app:
+    command: python /app/idw.py
+    image: jterstriep/dask-wbt
+    volumes:
+      - "/mnt/nrcs:/mnt/nrcs"
+      - "./app:/app"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 20s
+        max_attempts: 3
+      
+
+#networks:
+#  tindex_overlay:
+#    external: true
+
