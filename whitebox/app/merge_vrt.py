@@ -2,9 +2,12 @@ import os
 import sys
 import time
 from glob import glob
-from whitebox import WhiteboxTools
 from dask.distributed import Client
 import geopandas as gpd
+import rasterio
+import rasterio.fill 
+import rasterio.merge
+from raster.vrt import WarpedVRT
 
 import pandas as pd
 pd.options.mode.chained_assignment = None
@@ -37,68 +40,48 @@ def merge_simple(fname, bounds, frags):
     f.close()
 
 
-def mosaic(fname, flist, preserve=True, verbose=False):
+def merge(df, crs):
     
-    print(f'mosaic: {fname} from {len(flist)} frags', flush=True)
-    wbt = WhiteboxTools()
-    wbt.verbose = verbose
+    print(f'mosaic: merging {len(flist)} frags', flush=True)
+    srcs = [rasterio.open(f) for f in df.location]
+    vrts = [WarpedVRT(s, src_crs=c, crs=crs) for s,c in zip(srcs, df['srs']]
+    nodata = srcs[0].nodata
 
-    if len(flist) < 2:
-        print('mosaic: less than 2 tifs', fname, flist, flush=True)
-        return False
-        
-    wbt.mosaic(inputs=';'.join(flist), output=fname, method='nn')
-    
-    if not preserve:
-        for f in flist:
-            try:
-                os.remove(f)
-            except FileNotFoundError:
-                pass
+    arr, transform = rasterio.merge.merge(vrts)
+    arr = rasterio.fill.fillnodata(arr[0,:,:], np.where(arr==nodata, 0, 1))
 
-    return True
+    # TODO just del srcs for bettter cleanup?
+    for s in srcs:
+        s.close()
+
+    return arr, transform
 
 
-def generate_quads(fname, bounds):
-    basename, ext = os.path.splitext(fname)
-    minx, miny, maxx, maxy = bounds
-    midx, midy = minx+(maxx-minx)/2, miny+(maxy-miny)/2
-    return {basename+'_sw'+ext: (minx, miny, midx, midy),
-            basename+'_nw'+ext: (minx, midy, midx, maxy),
-            basename+'_se'+ext: (midx, miny, maxx, midy),
-            basename+'_ne'+ext: (midx, midy, maxx, maxy)}
+def merge_frags(fname, frags, bounds, crs)
+    """Find the frags within the bounds and merge into numpy array
 
+      Args:
+        frags (GeoDataFrame): dataframe containing fragment metadata
+        bounds (tuple(float*4)): limit frags to the bounds
+        crs (): target CRS
 
-def merge_frags(fname, bounds, frags, maxfiles=200):
+      Returns:
+        tuple(ndarray, ndarray): merged array and Affine transform
+    """
 
-    print(f'merge_frags:', fname, flush=True)
+    print(f'merge_frags:', flush=True)
+    overlap = frags.iloc[list(frags.sindex.intersection(bounds))]
+    try:
+        arr, transform = merge(overlap, crs)
+    except Exception as e:
+        print(f'Error creating {fname}: missing frags', flush=True)
 
-    # don't reprocess existing DEM tiles
-    if os.path.exists(fname):
-        print(f'{fname} exists', flush=True)
-        return True
+    with rasterio.open(fname, 'w') as f:
+        f.crs = crs
+        f.transform = transform
+        f.nodata = -32768.0
+        f.write(arr)
 
-    sindex = frags.sindex
-    overlap = frags.iloc[list(sindex.intersection(bounds))]
-
-    # only proceed if all DEM frags are available
-    for f in overlap['location']:
-        if not os.path.exists(f):
-            print(f'merge_frags: frag {f} not found for {fname}', flush=True)
-            return False
-        
-    if len(overlap) < maxfiles:
-        return mosaic(fname, overlap['location'])
-
-    else:
-        flist = []
-        for qname,qbounds in generate_quads(fname, bounds).items():
-            flist.append(qname)
-            overlap = frags.iloc[list(sindex.intersection(qbounds))]
-            mosaic(qname, overlap['location'])
-        
-        return mosaic(fname, flist, preserve=False)
-        
 
 def get_target_tiles(fname, path, ext='.tif', exists=False):
     """Read DEM tindex; optionally add location and check existence
@@ -107,7 +90,7 @@ def get_target_tiles(fname, path, ext='.tif', exists=False):
         fname (str): DEM tindex
         path (str): directory where DEM tiles will reside
         ext (str):  file extension of DEM tiles
-        exists (bool): check for tile existence
+        exists (bool): adds column based on tile's existence
 
       Returns:
         (GeoDataFrame)
@@ -126,7 +109,7 @@ def get_tif_fragments(fname, ext='.tif'):
 
       Args:
         fname (str): LAS tindex
-        ext (str):  file extension of DEM tiles
+        ext (str):  file extension of DEM fragments
 
       Returns:
         (GeoDataFrame)
@@ -148,8 +131,8 @@ def main():
     frags = client.scatter(tindex, broadcast=True)
 
     print('submitting tasks', flush=True)
-    futures = [client.submit(merge_frags, fname, bounds[1:], frags)
-        for fname, bounds in zip(dems['location'], dems.bounds.itertuples())]
+    futures = [client.submit(merge_frags, t.location, t.srs, b[1:], frags)
+        for t, b in zip(dems.itertuples(), dems.bounds.itertuples())]
 
     dems['processed'] = client.gather(futures)
     print('tasks gathered', flush=True)
